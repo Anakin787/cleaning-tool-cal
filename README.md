@@ -33,3 +33,12 @@ export const firebaseConfig = {
 
 `schedules`와 `polls` 컬렉션에 대한 읽기/쓰기 규칙을 설정해야 합니다.
 경로: `artifacts/{appId}/public/data/schedules`, `artifacts/{appId}/public/data/polls`
+
+## GitHub Pages 배포
+
+`main` 브랜치에 push하면 GitHub Actions가 자동으로 빌드 후 GitHub Pages에 배포합니다.
+
+**최초 1회 설정**: GitHub 저장소 → Settings → Pages → Build and deployment  
+Source를 **GitHub Actions**로 선택하세요.
+
+배포 완료 후 접속 URL: `https://anakin787.github.io/cleaning-tool-cal/`
