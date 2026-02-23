@@ -154,6 +154,7 @@ interface Poll {
   allowMultiple?: boolean;
   isAnonymous?: boolean;
   allowAddOptions?: boolean;
+  createdAt?: number;
 }
 
 export default function App() {
@@ -360,7 +361,6 @@ export default function App() {
         : [...mySelectedIds, optionId];
       
       const voteDelta = alreadyVoted ? -1 : 1;
-      const optVoteDelta = alreadyVoted ? -1 : 1;
       const updatedOptions = poll.options.map(opt => 
         opt.id === optionId ? { ...opt, votes: Math.max(0, opt.votes + voteDelta) } : opt
       );
