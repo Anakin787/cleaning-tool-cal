@@ -4,7 +4,6 @@ import {
   CheckSquare, 
   Check,
   Plus, 
-  Clock, 
   MapPin, 
   ChevronRight, 
   Trash2, 
@@ -18,7 +17,8 @@ import {
   Pencil,
   ChevronLeft,
   MessageCircle,
-  Send
+  Send,
+  X
 } from 'lucide-react';
 
 // Firebase Imports
@@ -125,7 +125,7 @@ const getCalendarDays = (year: number, month: number) => {
 
 const WEEKDAYS_KO = ['일', '월', '화', '수', '목', '금', '토'];
 
-const MEMBER_NAMES = ['지운', '대성', '준호', '하운', '병주', '형진', '태욱', '승재', '현우', '태현', '상혁', '승희', '가람', '효민', '웅', '준이형', '한을'];
+const MEMBER_NAMES = ['지운', '대성', '준호', '하운', '병주', '형진', '태욱', '승재', '현우', '태현', '상혁', '승희', '가람', '효민', '웅', '준이형', '한을'].sort((a, b) => a.localeCompare(b, 'ko-KR'));
 
 const DISPLAY_NAME_KEY = `cleaning-tool-cal-displayName`;
 
@@ -167,10 +167,12 @@ interface Poll {
   totalVotes: number;
   votedUsers?: string[];
   votedUserOptions?: Record<string, string[]>; // userId -> optionIds (중복투표용)
+  voterDisplayNames?: Record<string, string>; // uid -> 닉네임 (누가 투표했는지 표시용)
   allowMultiple?: boolean;
   isAnonymous?: boolean;
   allowAddOptions?: boolean;
   createdAt?: number;
+  endDate?: string; // YYYY-MM-DD, 기한 없으면 undefined
 }
 
 export default function App() {
@@ -192,7 +194,8 @@ export default function App() {
     options: ['', ''] as string[], 
     allowMultiple: false, 
     isAnonymous: false, 
-    allowAddOptions: false 
+    allowAddOptions: false,
+    endDate: '' as string
   });
   const [addingOptionToPollId, setAddingOptionToPollId] = useState<string | null>(null);
   const [newOptionText, setNewOptionText] = useState('');
@@ -210,6 +213,10 @@ export default function App() {
   const [scheduleComments, setScheduleComments] = useState<Record<string, ScheduleComment[]>>({});
   const [newCommentText, setNewCommentText] = useState('');
   const [expandedScheduleId, setExpandedScheduleId] = useState<string | null>(null); // 상세/댓글 펼친 일정
+
+  // 일정 목록 페이지네이션 (5개씩)
+  const [scheduleListLimit, setScheduleListLimit] = useState(5);
+  const [scheduleListLoadingMore, setScheduleListLoadingMore] = useState(false);
 
   useEffect(() => {
     const initAuth = async () => {
@@ -391,9 +398,10 @@ export default function App() {
         votedUserOptions: {},
         allowMultiple: newPoll.allowMultiple,
         isAnonymous: newPoll.isAnonymous,
-        allowAddOptions: newPoll.allowAddOptions
+        allowAddOptions: newPoll.allowAddOptions,
+        endDate: newPoll.endDate.trim() || undefined
       });
-      setNewPoll({ question: '', options: ['', ''], allowMultiple: false, isAnonymous: false, allowAddOptions: false });
+      setNewPoll({ question: '', options: ['', ''], allowMultiple: false, isAnonymous: false, allowAddOptions: false, endDate: '' });
       setIsAddingPoll(false);
     } catch (err) {
       console.error("Add poll error:", err);
@@ -427,34 +435,61 @@ export default function App() {
         : (newSelectedIds.length === 0 ? votedUsers.filter(id => id !== user.uid) : votedUsers);
       const newTotal = poll.totalVotes + voteDelta;
 
+      const voterNames = { ...(poll.voterDisplayNames || {}), [user.uid]: userDisplayName || '익명' };
       try {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'polls', pollId), {
           options: updatedOptions,
           totalVotes: Math.max(0, newTotal),
           votedUserOptions: newVotedUserOpts,
-          votedUsers: newVotedUsers
+          votedUsers: newVotedUsers,
+          voterDisplayNames: voterNames
         });
       } catch (err) {
         console.error("Vote error:", err);
       }
     } else {
-      if (votedUsers.includes(user.uid)) return;
-      try {
-        const pollRef = doc(db, 'artifacts', appId, 'public', 'data', 'polls', pollId);
-        const updatedOptions = poll.options.map(opt => 
+      // 단일 선택: 기존 투표 수정 허용 (다른 항목 클릭 시 변경)
+      const prevOptionId = mySelectedIds[0];
+      const isChangingVote = votedUsers.includes(user.uid) && prevOptionId;
+      const isSameOption = prevOptionId === optionId;
+      if (isSameOption) return; // 같은 항목 재클릭 시 무시
+
+      let updatedOptions = poll.options.map(opt => ({ ...opt }));
+      let newTotal = poll.totalVotes;
+
+      if (isChangingVote) {
+        updatedOptions = updatedOptions.map(opt =>
+          opt.id === prevOptionId ? { ...opt, votes: Math.max(0, opt.votes - 1) } :
           opt.id === optionId ? { ...opt, votes: opt.votes + 1 } : opt
         );
+        newTotal = poll.totalVotes; // totalVotes 유지 (1표만 이동)
+      } else {
+        updatedOptions = updatedOptions.map(opt =>
+          opt.id === optionId ? { ...opt, votes: opt.votes + 1 } : opt
+        );
+        newTotal = poll.totalVotes + 1;
+      }
+
+      const newVotedUserOpts = { ...votedUserOpts, [user.uid]: [optionId] };
+      const newVotedUsers = votedUsers.includes(user.uid) ? votedUsers : [...votedUsers, user.uid];
+
+      const voterNames = { ...(poll.voterDisplayNames || {}), [user.uid]: userDisplayName || '익명' };
+      try {
+        const pollRef = doc(db, 'artifacts', appId, 'public', 'data', 'polls', pollId);
         await updateDoc(pollRef, {
           options: updatedOptions,
-          totalVotes: poll.totalVotes + 1,
-          votedUsers: [...votedUsers, user.uid],
-          votedUserOptions: { ...votedUserOpts, [user.uid]: [optionId] }
+          totalVotes: newTotal,
+          votedUserOptions: newVotedUserOpts,
+          votedUsers: newVotedUsers,
+          voterDisplayNames: voterNames
         });
       } catch (err) {
         console.error("Vote error:", err);
       }
     }
   };
+
+  const getVoterName = (poll: Poll, uid: string) => poll.voterDisplayNames?.[uid] || '익명';
 
   const addOptionToPoll = async (pollId: string) => {
     if (!user || !newOptionText.trim()) return;
@@ -652,12 +687,22 @@ export default function App() {
                           </button>
                         </div>
                       </div>
-                      <button
-                        onClick={(e) => { e.stopPropagation(); setView('schedules'); startEditSchedule(schedule); }}
-                        className="p-2 -m-2 rounded-lg shrink-0 text-slate-300 hover:bg-slate-100 hover:text-slate-600 transition-colors"
-                      >
-                        <ChevronRight size={18} />
-                      </button>
+                      <div className="flex items-center gap-1 shrink-0">
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setView('schedules'); startEditSchedule(schedule); }}
+                          className="p-2 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                          title="수정"
+                        >
+                          <Pencil size={18} />
+                        </button>
+                        <button
+                          onClick={(e) => { e.stopPropagation(); if (confirm('일정을 삭제할까요?')) deleteSchedule(schedule.id); }}
+                          className="p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                          title="삭제"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
                     </div>
                   </Card>
                   );
@@ -673,7 +718,7 @@ export default function App() {
             <section>
               <div className="flex items-center justify-between mb-3">
                 <h2 className="text-lg font-bold flex items-center gap-2 text-slate-800">
-                  <Vote size={18} className="text-purple-500" /> 최근 투표
+                  <Vote size={18} className="text-purple-500" /> 진행중인 투표 ({polls.length})
                 </h2>
                 <button onClick={() => setView('polls')} className="text-sm text-blue-600 font-medium">전체보기</button>
               </div>
@@ -706,7 +751,9 @@ export default function App() {
         )}
 
         {view === 'schedules' && (
-          <div className="space-y-4">
+          <div className="flex flex-col lg:flex-row gap-4 w-full">
+            {/* 왼쪽: 캘린더 + 전체 일정 목록 */}
+            <div className="flex-1 min-w-0 space-y-4">
             {/* 캘린더 - 한 달 일정 한눈에 */}
             <Card className="p-3 sm:p-4">
               <div className="flex items-center justify-between mb-3">
@@ -761,7 +808,7 @@ export default function App() {
             </Card>
 
             <div className="flex items-center justify-between">
-              <h3 className="font-bold text-slate-800">이번 달 일정</h3>
+              <h3 className="font-bold text-slate-800">전체 일정</h3>
               <Button 
                 onClick={() => { if (editingScheduleId) cancelEditSchedule(); setIsAddingSchedule(!isAddingSchedule); setExpandedScheduleId(null); }} 
                 variant={isAddingSchedule ? "outline" : "primary"}
@@ -790,23 +837,31 @@ export default function App() {
               </Card>
             )}
 
-            {/* 이번 달 일정 목록 */}
+            {/* 전체 일정 목록 (날짜 순, 5개씩 더보기) */}
+            {(() => {
+              const allSchedules = schedules
+                .filter(s => s.id !== editingScheduleId)
+                .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+              const visibleSchedules = allSchedules.slice(0, scheduleListLimit);
+              const hasMore = allSchedules.length > scheduleListLimit;
+
+              const handleLoadMore = () => {
+                setScheduleListLoadingMore(true);
+                setTimeout(() => {
+                  setScheduleListLimit(prev => prev + 5);
+                  setScheduleListLoadingMore(false);
+                }, 300);
+              };
+
+              return (
             <div className="space-y-2 sm:space-y-3">
-              {schedules
-                .filter(s => {
-                  const [y, m] = [calendarMonth.getFullYear(), calendarMonth.getMonth() + 1];
-                  const [sy, sm] = s.date.split('-').map(Number);
-                  return sy === y && sm === m && s.id !== editingScheduleId;
-                })
-                .map(schedule => {
-                  const uid = user?.uid ?? '';
-                  const myResponse: ScheduleResponse | null = schedule.attendees?.includes(uid) ? 'attend' : schedule.notAttendees?.includes(uid) ? 'notAttend' : schedule.undecided?.includes(uid) ? 'undecided' : null;
-                  const isExpanded = expandedScheduleId === schedule.id;
+              {visibleSchedules.map(schedule => {
+                  const isSelected = expandedScheduleId === schedule.id;
                   return (
-                    <Card key={schedule.id} className={`overflow-hidden transition-all ${isExpanded ? 'ring-2 ring-blue-400' : ''}`}>
+                    <Card key={schedule.id} className={`overflow-hidden transition-all cursor-pointer ${isSelected ? 'ring-2 ring-blue-400 bg-blue-50/20' : ''}`}>
                       <div 
-                        onClick={() => setExpandedScheduleId(isExpanded ? null : schedule.id)}
-                        className="p-3 sm:p-4 cursor-pointer flex items-center justify-between gap-2"
+                        onClick={() => setExpandedScheduleId(isSelected ? null : schedule.id)}
+                        className="p-3 sm:p-4 flex items-center justify-between gap-2"
                       >
                         <div className="flex-1 min-w-0">
                           <h3 className="font-bold text-slate-800 truncate">{schedule.title}</h3>
@@ -826,78 +881,109 @@ export default function App() {
                             )}
                           </div>
                         </div>
-                        <ChevronRight size={20} className={`shrink-0 text-slate-400 transition-transform ${isExpanded ? 'rotate-90' : ''}`} />
+                        <ChevronRight size={20} className={`shrink-0 text-slate-400 transition-transform ${isSelected ? 'rotate-90' : ''}`} />
                       </div>
-
-                      {isExpanded && (
-                        <div className="border-t border-slate-100 p-3 sm:p-4 bg-slate-50/50 space-y-4">
-                          {schedule.desc && <p className="text-sm text-slate-600 italic">&quot;{schedule.desc}&quot;</p>}
-                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm">
-                            <div className="flex items-center gap-2 text-slate-600">
-                              <Clock size={14} /> {formatTime24(schedule.time) || '시간 미지정'}
-                            </div>
-                            <div className="flex items-center gap-2 text-slate-600 sm:col-span-2">
-                              <MapPin size={14} /> {schedule.location || '장소 미지정'}
-                            </div>
-                          </div>
-                          <div className="flex flex-wrap gap-2 touch-manipulation">
-                            <button onClick={() => handleScheduleVote(schedule.id, 'attend')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'attend' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600 hover:bg-green-50'}`}>
-                              <ThumbsUp size={16} fill={myResponse === 'attend' ? 'currentColor' : 'none'} /> 참석 ({schedule.attendees?.length ?? 0})
-                            </button>
-                            <button onClick={() => handleScheduleVote(schedule.id, 'notAttend')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'notAttend' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600 hover:bg-red-50'}`}>
-                              <ThumbsDown size={16} fill={myResponse === 'notAttend' ? 'currentColor' : 'none'} /> 불참 ({schedule.notAttendees?.length ?? 0})
-                            </button>
-                            <button onClick={() => handleScheduleVote(schedule.id, 'undecided')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'undecided' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600 hover:bg-amber-50'}`}>
-                              <HelpCircle size={16} fill={myResponse === 'undecided' ? 'currentColor' : 'none'} /> 미정 ({schedule.undecided?.length ?? 0})
-                            </button>
-                          </div>
-                          <div className="text-xs text-slate-500 space-y-1">
-                            {(schedule.attendees?.length ?? 0) > 0 && (
-                              <p><span className="font-medium text-green-600">참:</span> {(schedule.attendees ?? []).map(uid => getAttendeeName(schedule, uid)).join(', ')}</p>
-                            )}
-                            {(schedule.notAttendees?.length ?? 0) > 0 && (
-                              <p><span className="font-medium text-red-600">불:</span> {(schedule.notAttendees ?? []).map(uid => getAttendeeName(schedule, uid)).join(', ')}</p>
-                            )}
-                            {(schedule.undecided?.length ?? 0) > 0 && (
-                              <p><span className="font-medium text-amber-600">미정:</span> {(schedule.undecided ?? []).map(uid => getAttendeeName(schedule, uid)).join(', ')}</p>
-                            )}
-                          </div>
-                          <div className="border-t border-slate-200 pt-3">
-                            <h4 className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1.5"><MessageCircle size={14} /> 댓글</h4>
-                            <div className="space-y-2 max-h-40 overflow-y-auto mb-2">
-                              {(scheduleComments[schedule.id] ?? []).map(c => (
-                                <div key={c.id} className="text-xs bg-white rounded-lg p-2 border border-slate-100">
-                                  <span className="font-medium text-slate-700">{c.displayName}</span>
-                                  <span className="text-slate-400 mx-1">·</span>
-                                  <span className="text-slate-500">{new Date(c.createdAt).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
-                                  <p className="mt-0.5 text-slate-600">{c.text}</p>
-                                </div>
-                              ))}
-                              {(scheduleComments[schedule.id] ?? []).length === 0 && <p className="text-xs text-slate-400 py-2">아직 댓글이 없습니다.</p>}
-                            </div>
-                            <div className="flex gap-2">
-                              <input
-                                className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
-                                placeholder="의견, 확답 예정일 등을 적어주세요..."
-                                value={expandedScheduleId === schedule.id ? newCommentText : ''}
-                                onChange={e => setNewCommentText(e.target.value)}
-                                onKeyDown={e => e.key === 'Enter' && !e.shiftKey && addScheduleComment(schedule.id, userDisplayName || '익명')}
-                              />
-                              <Button onClick={() => addScheduleComment(schedule.id, userDisplayName || '익명')} className="shrink-0 py-2" disabled={!newCommentText.trim()}>
-                                <Send size={16} />
-                              </Button>
-                            </div>
-                          </div>
-                          <div className="flex gap-1 pt-2">
-                            <button onClick={(e) => { e.stopPropagation(); startEditSchedule(schedule); }} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="수정"><Pencil size={16} /></button>
-                            <button onClick={(e) => { e.stopPropagation(); if (confirm('일정을 삭제할까요?')) deleteSchedule(schedule.id); }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="삭제"><Trash2 size={16} /></button>
-                          </div>
-                        </div>
-                      )}
                     </Card>
                   );
                 })}
+              {scheduleListLoadingMore && (
+                <>
+                  {[...Array(5)].map((_, i) => (
+                    <div key={`skeleton-${i}`} className="bg-white rounded-xl border border-slate-200 overflow-hidden animate-pulse">
+                      <div className="p-4 space-y-3">
+                        <div className="h-4 bg-slate-200 rounded w-3/4" />
+                        <div className="h-3 bg-slate-100 rounded w-1/2" />
+                        <div className="flex gap-2">
+                          <div className="h-6 bg-slate-100 rounded w-12" />
+                          <div className="h-6 bg-slate-100 rounded w-12" />
+                          <div className="h-6 bg-slate-100 rounded w-12" />
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+              {hasMore && !scheduleListLoadingMore && (
+                <button
+                  onClick={handleLoadMore}
+                  className="w-full py-3 rounded-xl border-2 border-dashed border-slate-200 text-slate-500 font-medium hover:border-blue-300 hover:text-blue-600 hover:bg-blue-50/30 transition-colors"
+                >
+                  더 보기 ({Math.min(5, allSchedules.length - scheduleListLimit)}개)
+                </button>
+              )}
             </div>
+              );
+            })()}
+            </div>
+
+            {/* 우측: 캘린더에서 선택한 일정 상세 (클릭 시 이동) */}
+            {expandedScheduleId && (() => {
+              const schedule = schedules.find(s => s.id === expandedScheduleId);
+              if (!schedule) return null;
+              const uid = user?.uid ?? '';
+              const myResponse: ScheduleResponse | null = schedule.attendees?.includes(uid) ? 'attend' : schedule.notAttendees?.includes(uid) ? 'notAttend' : schedule.undecided?.includes(uid) ? 'undecided' : null;
+              return (
+                <aside className="w-full lg:w-80 xl:w-96 shrink-0 lg:sticky lg:top-24 h-fit">
+                  <Card className="overflow-hidden ring-2 ring-blue-400">
+                    <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                      <h3 className="font-bold text-slate-800 truncate">{schedule.title}</h3>
+                      <button onClick={() => setExpandedScheduleId(null)} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600" title="닫기"><X size={18} /></button>
+                    </div>
+                    <div className="p-4 space-y-4">
+                      <div className="space-y-1 text-sm text-slate-600">
+                        <div className="flex items-center gap-2"><Calendar size={14} /> {formatDateKO(schedule.date)} {formatTime24(schedule.time) && `· ${formatTime24(schedule.time)}`}</div>
+                        {schedule.location && <div className="flex items-center gap-2"><MapPin size={14} /> {schedule.location}</div>}
+                      </div>
+                      {schedule.desc && <p className="text-sm text-slate-600 italic">&quot;{schedule.desc}&quot;</p>}
+                      <div className="flex flex-wrap gap-2 touch-manipulation">
+                        <button onClick={() => handleScheduleVote(schedule.id, 'attend')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'attend' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600 hover:bg-green-50'}`}>
+                          <ThumbsUp size={16} fill={myResponse === 'attend' ? 'currentColor' : 'none'} /> 참석 ({schedule.attendees?.length ?? 0})
+                        </button>
+                        <button onClick={() => handleScheduleVote(schedule.id, 'notAttend')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'notAttend' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600 hover:bg-red-50'}`}>
+                          <ThumbsDown size={16} fill={myResponse === 'notAttend' ? 'currentColor' : 'none'} /> 불참 ({schedule.notAttendees?.length ?? 0})
+                        </button>
+                        <button onClick={() => handleScheduleVote(schedule.id, 'undecided')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'undecided' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600 hover:bg-amber-50'}`}>
+                          <HelpCircle size={16} fill={myResponse === 'undecided' ? 'currentColor' : 'none'} /> 미정 ({schedule.undecided?.length ?? 0})
+                        </button>
+                      </div>
+                      <div className="text-xs text-slate-500 space-y-1">
+                        {(schedule.attendees?.length ?? 0) > 0 && <p><span className="font-medium text-green-600">참:</span> {(schedule.attendees ?? []).map(u => getAttendeeName(schedule, u)).join(', ')}</p>}
+                        {(schedule.notAttendees?.length ?? 0) > 0 && <p><span className="font-medium text-red-600">불:</span> {(schedule.notAttendees ?? []).map(u => getAttendeeName(schedule, u)).join(', ')}</p>}
+                        {(schedule.undecided?.length ?? 0) > 0 && <p><span className="font-medium text-amber-600">미정:</span> {(schedule.undecided ?? []).map(u => getAttendeeName(schedule, u)).join(', ')}</p>}
+                      </div>
+                      <div className="border-t border-slate-200 pt-3">
+                        <h4 className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1.5"><MessageCircle size={14} /> 댓글</h4>
+                        <div className="space-y-2 max-h-40 overflow-y-auto mb-2">
+                          {(scheduleComments[schedule.id] ?? []).map(c => (
+                            <div key={c.id} className="text-xs bg-white rounded-lg p-2 border border-slate-100">
+                              <span className="font-medium text-slate-700">{c.displayName}</span>
+                              <span className="text-slate-400 mx-1">·</span>
+                              <span className="text-slate-500">{new Date(c.createdAt).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                              <p className="mt-0.5 text-slate-600">{c.text}</p>
+                            </div>
+                          ))}
+                          {(scheduleComments[schedule.id] ?? []).length === 0 && <p className="text-xs text-slate-400 py-2">아직 댓글이 없습니다.</p>}
+                        </div>
+                        <div className="flex gap-2">
+                          <input
+                            className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            placeholder="의견, 확답 예정일 등을 적어주세요..."
+                            value={expandedScheduleId === schedule.id ? newCommentText : ''}
+                            onChange={e => setNewCommentText(e.target.value)}
+                            onKeyDown={e => e.key === 'Enter' && !e.shiftKey && addScheduleComment(schedule.id, userDisplayName || '익명')}
+                          />
+                          <Button onClick={() => addScheduleComment(schedule.id, userDisplayName || '익명')} className="shrink-0 py-2" disabled={!newCommentText.trim()}><Send size={16} /></Button>
+                        </div>
+                      </div>
+                      <div className="flex gap-1 pt-2">
+                        <button onClick={() => startEditSchedule(schedule)} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="수정"><Pencil size={16} /></button>
+                        <button onClick={() => { if (confirm('일정을 삭제할까요?')) { deleteSchedule(schedule.id); setExpandedScheduleId(null); } }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="삭제"><Trash2 size={16} /></button>
+                      </div>
+                    </div>
+                  </Card>
+                </aside>
+              );
+            })()}
           </div>
         )}
 
@@ -955,6 +1041,12 @@ export default function App() {
                       </div>
                     ))}
                   </div>
+                  <Input 
+                    label="투표 마감일 (선택)" 
+                    type="date" 
+                    value={newPoll.endDate} 
+                    onChange={e => setNewPoll({...newPoll, endDate: e.target.value})}
+                  />
                   <div className="flex flex-wrap gap-4 pt-2 border-t border-slate-200">
                     <label className="flex items-center gap-2 cursor-pointer">
                       <input 
@@ -995,7 +1087,9 @@ export default function App() {
                 const isMulti = poll.allowMultiple ?? false;
                 const mySelectedIds = (poll.votedUserOptions || {})[uid] || [];
                 const hasVoted = isMulti ? mySelectedIds.length > 0 : poll.votedUsers?.includes(uid);
-                const canVote = isMulti ? true : !hasVoted;
+                const today = new Date().toISOString().slice(0, 10);
+                const isExpired = poll.endDate ? poll.endDate < today : false;
+                const canVote = !isExpired;
 
                 return (
                   <Card key={poll.id} className="p-6 group">
@@ -1003,9 +1097,14 @@ export default function App() {
                       <div>
                         <h3 className="text-lg font-bold text-slate-800">{poll.question}</h3>
                         <div className="flex flex-wrap items-center gap-2 mt-1">
-                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${hasVoted ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
-                            {hasVoted ? '투표 완료' : '진행 중'}
+                          <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isExpired ? 'bg-slate-200 text-slate-600' : hasVoted ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
+                            {isExpired ? '종료됨' : hasVoted ? '투표 완료' : '진행 중'}
                           </span>
+                          {poll.endDate && (
+                            <span className="text-[10px] text-slate-500 font-medium">
+                              마감 {formatDateKO(poll.endDate)}
+                            </span>
+                          )}
                           {isMulti && <span className="text-[10px] text-amber-600 font-medium">복수선택</span>}
                           {poll.isAnonymous && <span className="text-[10px] text-slate-500 font-medium">익명</span>}
                           {!poll.isAnonymous && <span className="text-[10px] text-slate-400 font-medium">총 {poll.votedUsers?.length ?? 0}명 참여</span>}
@@ -1027,10 +1126,10 @@ export default function App() {
                         return (
                           <button
                             key={opt.id}
-                            disabled={!isMulti && hasVoted}
+                            disabled={!canVote}
                             onClick={() => canVote && handleVote(poll.id, opt.id)}
                             className={`w-full text-left relative overflow-hidden rounded-xl border transition-all ${
-                              (!canVote && hasVoted) ? 'border-slate-100 bg-slate-50/50 cursor-default' : 
+                              !canVote ? 'border-slate-100 bg-slate-50/50 cursor-default' : 
                               isSelected ? 'border-slate-200 border-l-4 border-l-blue-500 bg-blue-50/30' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50/50 active:scale-[0.98] cursor-pointer'
                             }`}
                           >
@@ -1041,25 +1140,38 @@ export default function App() {
                                 style={{ width: `${percentage}%` }}
                               />
                             )}
-                            <div className="relative p-3.5 flex justify-between items-center z-10">
-                              <span className="text-sm font-semibold flex items-center gap-2 text-slate-700">
-                                {isMulti && (
-                                  <span className={`inline-flex items-center justify-center w-4 h-4 shrink-0 rounded border shrink-0 ${
-                                    isSelected ? 'bg-blue-500 border-blue-500 text-white' : 'border-slate-300 bg-white'
-                                  }`}>
-                                    {isSelected ? <Check size={12} strokeWidth={3} /> : null}
-                                  </span>
-                                )}
-                                {opt.text}
-                              </span>
-                              {showVoteResult && (
-                                <div className="flex items-center gap-2">
-                                  <div className="w-24 h-1.5 bg-slate-200 rounded-full overflow-hidden hidden sm:block">
-                                    <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: `${percentage}%` }} />
+                            <div className="relative p-3.5 z-10">
+                              <div className="flex items-start justify-between gap-2">
+                                <span className="text-sm font-semibold flex items-center gap-2 text-slate-700">
+                                  {(isMulti || hasVoted) && (
+                                    <span className={`inline-flex items-center justify-center w-4 h-4 shrink-0 rounded border ${
+                                      isSelected ? 'bg-blue-500 border-blue-500 text-white' : 'border-slate-300 bg-white'
+                                    }`}>
+                                      {isSelected ? <Check size={12} strokeWidth={3} /> : null}
+                                    </span>
+                                  )}
+                                  {opt.text}
+                                </span>
+                                {showVoteResult && (
+                                  <div className="flex items-center gap-2 shrink-0">
+                                    <div className="w-24 h-1.5 bg-slate-200 rounded-full overflow-hidden hidden sm:block">
+                                      <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: `${percentage}%` }} />
+                                    </div>
+                                    <span className="text-xs font-bold text-blue-600 tabular-nums">{opt.votes}표 ({Math.round(percentage)}%)</span>
                                   </div>
-                                  <span className="text-xs font-bold text-blue-600 tabular-nums">{opt.votes}표 ({Math.round(percentage)}%)</span>
-                                </div>
-                              )}
+                                )}
+                              </div>
+                              {showVoteResult && !poll.isAnonymous && (() => {
+                                const voterUids = Object.entries(poll.votedUserOptions || {})
+                                  .filter(([, ids]) => ids.includes(opt.id))
+                                  .map(([u]) => u);
+                                if (voterUids.length === 0) return null;
+                                return (
+                                  <p className="text-[11px] text-slate-500 mt-1 ml-6">
+                                    {voterUids.map(u => getVoterName(poll, u)).join(', ')}
+                                  </p>
+                                );
+                              })()}
                             </div>
                           </button>
                         );
@@ -1093,9 +1205,14 @@ export default function App() {
                       </div>
                     )}
 
-                    {!hasVoted && (
+                    {canVote && (
                       <div className="mt-4 flex items-center justify-center gap-1.5 text-[11px] text-slate-400 font-medium">
-                        <CheckSquare size={12} /> {isMulti ? '여러 항목을 선택할 수 있습니다.' : '클릭하여 투표에 참여하세요.'}
+                        <CheckSquare size={12} /> {hasVoted ? (isMulti ? '여러 항목을 선택·변경할 수 있습니다.' : '다른 항목을 클릭하면 변경할 수 있습니다.') : (isMulti ? '여러 항목을 선택할 수 있습니다.' : '클릭하여 투표에 참여하세요.')}
+                      </div>
+                    )}
+                    {!canVote && (
+                      <div className="mt-4 flex items-center justify-center gap-1.5 text-[11px] text-slate-400 font-medium">
+                        투표가 종료되었습니다.
                       </div>
                     )}
                   </Card>
