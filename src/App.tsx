@@ -378,10 +378,28 @@ export default function App() {
     const undecided = schedule.undecided || [];
     const displayNames = schedule.attendeeDisplayNames || {};
 
-    const newAttendees = response === 'attend' ? [...attendees.filter(id => id !== user.uid), user.uid] : attendees.filter(id => id !== user.uid);
-    const newNotAttendees = response === 'notAttend' ? [...notAttendees.filter(id => id !== user.uid), user.uid] : notAttendees.filter(id => id !== user.uid);
-    const newUndecided = response === 'undecided' ? [...undecided.filter(id => id !== user.uid), user.uid] : undecided.filter(id => id !== user.uid);
-    const newDisplayNames = { ...displayNames, [user.uid]: userDisplayName };
+    // 같은 이름은 한 번만: 폰/PC 다른 세션에서 같은 이름으로 중복 선택 방지
+    const removeByName = (arr: string[]) => arr.filter(uid => displayNames[uid] !== userDisplayName);
+    let newAttendees = removeByName(attendees);
+    let newNotAttendees = removeByName(notAttendees);
+    let newUndecided = removeByName(undecided);
+    // 같은 버튼 재클릭 시 선택 해제 (아무것도 선택 안 된 상태)
+    const wasAlreadySelected =
+      (response === 'attend' && attendees.some(uid => displayNames[uid] === userDisplayName)) ||
+      (response === 'notAttend' && notAttendees.some(uid => displayNames[uid] === userDisplayName)) ||
+      (response === 'undecided' && undecided.some(uid => displayNames[uid] === userDisplayName));
+    if (!wasAlreadySelected) {
+      if (response === 'attend') newAttendees = [...newAttendees, user.uid];
+      else if (response === 'notAttend') newNotAttendees = [...newNotAttendees, user.uid];
+      else if (response === 'undecided') newUndecided = [...newUndecided, user.uid];
+    }
+
+    const allUids = new Set([...newAttendees, ...newNotAttendees, ...newUndecided]);
+    const newDisplayNames: Record<string, string> = {};
+    for (const uid of allUids) {
+      if (uid === user.uid) newDisplayNames[uid] = userDisplayName;
+      else if (displayNames[uid]) newDisplayNames[uid] = displayNames[uid];
+    }
 
     try {
       const scheduleRef = doc(db, 'artifacts', appId, 'public', 'data', 'schedules', scheduleId);
@@ -602,6 +620,17 @@ export default function App() {
 
   const getAttendeeName = (schedule: Schedule, uid: string) => schedule.attendeeDisplayNames?.[uid] || '익명';
 
+  // 같은 이름은 한 번만: 표시 이름 기준으로 내 응답 판단 (폰/PC 다른 세션에서도 올바르게 표시)
+  const getMyScheduleResponse = (schedule: Schedule): ScheduleResponse | null => {
+    if (!userDisplayName) return null;
+    const names = schedule.attendeeDisplayNames || {};
+    const hasName = (arr: string[]) => arr.some(uid => names[uid] === userDisplayName);
+    if (hasName(schedule.attendees || [])) return 'attend';
+    if (hasName(schedule.notAttendees || [])) return 'notAttend';
+    if (hasName(schedule.undecided || [])) return 'undecided';
+    return null;
+  };
+
   return (
     <div className="min-h-screen min-h-[100dvh] bg-slate-50 text-slate-900 font-sans flex flex-col pb-20 md:pb-6">
       <header className="bg-white border-b border-slate-200 sticky top-0 z-20 safe-area-inset-top shrink-0">
@@ -664,8 +693,7 @@ export default function App() {
               </div>
               <div className="space-y-3">
                 {schedules.length > 0 ? schedules.slice(0, 2).map(schedule => {
-                  const uid = user?.uid ?? '';
-                  const myResponse: ScheduleResponse | null = schedule.attendees?.includes(uid) ? 'attend' : schedule.notAttendees?.includes(uid) ? 'notAttend' : schedule.undecided?.includes(uid) ? 'undecided' : null;
+                  const myResponse = getMyScheduleResponse(schedule);
                   const attendCount = schedule.attendees?.length ?? 0;
                   const notAttendCount = schedule.notAttendees?.length ?? 0;
                   const undecidedCount = schedule.undecided?.length ?? 0;
@@ -835,8 +863,7 @@ export default function App() {
             {expandedScheduleId && (() => {
               const schedule = schedules.find(s => s.id === expandedScheduleId);
               if (!schedule) return null;
-              const uid = user?.uid ?? '';
-              const myResponse: ScheduleResponse | null = schedule.attendees?.includes(uid) ? 'attend' : schedule.notAttendees?.includes(uid) ? 'notAttend' : schedule.undecided?.includes(uid) ? 'undecided' : null;
+              const myResponse = getMyScheduleResponse(schedule);
               return (
                 <div ref={scheduleDetailPanelRef} className="lg:hidden">
                   <Card className="overflow-hidden ring-2 ring-blue-400">
@@ -1020,8 +1047,7 @@ export default function App() {
             {expandedScheduleId && (() => {
               const schedule = schedules.find(s => s.id === expandedScheduleId);
               if (!schedule) return null;
-              const uid = user?.uid ?? '';
-              const myResponse: ScheduleResponse | null = schedule.attendees?.includes(uid) ? 'attend' : schedule.notAttendees?.includes(uid) ? 'notAttend' : schedule.undecided?.includes(uid) ? 'undecided' : null;
+              const myResponse = getMyScheduleResponse(schedule);
               return (
                 <aside className="hidden lg:block w-80 xl:w-96 shrink-0 sticky top-24 h-fit">
                   <Card className="overflow-hidden ring-2 ring-blue-400">
