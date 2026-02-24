@@ -34,9 +34,11 @@ import {
   collection, 
   doc, 
   addDoc, 
+  setDoc,
   updateDoc, 
   deleteDoc, 
-  onSnapshot
+  onSnapshot,
+  serverTimestamp
 } from 'firebase/firestore';
 import { firebaseConfig, appId, initialAuthToken } from './config';
 import type { User } from 'firebase/auth';
@@ -226,6 +228,10 @@ export default function App() {
   // 삭제 확인 모달 (커스텀 모달 - PWA/모바일에서 native confirm 미동작 대비)
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'schedule' | 'poll'; id: string } | null>(null);
 
+  // 현재 접속 중인 사람들 (lastSeen 2분 이내)
+  const [onlineUsers, setOnlineUsers] = useState<{ uid: string; displayName: string }[]>([]);
+  const [showOnlineList, setShowOnlineList] = useState(false);
+
   useEffect(() => {
     const initAuth = async () => {
       try {
@@ -295,6 +301,54 @@ export default function App() {
       }, 100);
     }
   }, [expandedScheduleId]);
+
+  // 접속 상태 (presence): 진입 시 등록, 30초마다 갱신, 이탈 시 삭제
+  useEffect(() => {
+    if (!user || !userDisplayName) return;
+    const presenceCol = collection(db, 'artifacts', appId, 'public', 'data', 'presence');
+    const presenceRef = doc(presenceCol, user.uid);
+
+    const setPresence = () => {
+      setDoc(presenceRef, { displayName: userDisplayName, lastSeen: serverTimestamp() }, { merge: true });
+    };
+
+    setPresence();
+    const interval = setInterval(setPresence, 30000);
+
+    return () => {
+      clearInterval(interval);
+      deleteDoc(presenceRef).catch(() => {});
+    };
+  }, [user, userDisplayName]);
+
+  // 접속자 목록 실시간 구독
+  useEffect(() => {
+    if (!user) return;
+    const presenceCol = collection(db, 'artifacts', appId, 'public', 'data', 'presence');
+    const unsub = onSnapshot(presenceCol, (snapshot) => {
+      const now = Date.now();
+      const ONLINE_MS = 2 * 60 * 1000; // 2분
+      const list = snapshot.docs
+        .map(d => {
+          const data = d.data();
+          let lastSeen = 0;
+          if (data.lastSeen?.toMillis) lastSeen = data.lastSeen.toMillis();
+          else if (typeof data.lastSeen === 'number') lastSeen = data.lastSeen;
+          else if (data.lastSeen) lastSeen = Date.now(); // serverTimestamp 미변환 시 일단 온라인으로
+          return { uid: d.id, displayName: data.displayName || '익명', lastSeen };
+        })
+        .filter(x => now - x.lastSeen < ONLINE_MS)
+        .sort((a, b) => a.displayName.localeCompare(b.displayName, 'ko'));
+      // 같은 이름 중복 제거 (폰/PC 동시 접속)
+      const seen = new Set<string>();
+      setOnlineUsers(list.filter(x => {
+        if (seen.has(x.displayName)) return false;
+        seen.add(x.displayName);
+        return true;
+      }).map(x => ({ uid: x.uid, displayName: x.displayName })));
+    }, (err) => console.error("Presence sync error:", err));
+    return () => unsub();
+  }, [user]);
 
   const addSchedule = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -445,79 +499,128 @@ export default function App() {
   };
 
   const handleVote = async (pollId: string, optionId: string) => {
-    if (!user) return;
+    if (!user || !userDisplayName) return;
     const poll = polls.find(p => p.id === pollId);
     if (!poll) return;
 
+    const voterNames = poll.voterDisplayNames || {};
     const votedUserOpts = poll.votedUserOptions || {};
     const votedUsers = poll.votedUsers || [];
-    const mySelectedIds = votedUserOpts[user.uid] || [];
+
+    // 같은 이름은 한 번만: 기존 동일 이름 투표 제거 (폰/PC 다른 세션)
+    const uidsToRemove = Object.entries(voterNames)
+      .filter(([, name]) => name === userDisplayName)
+      .map(([uid]) => uid);
+
+    let options = poll.options.map(opt => ({ ...opt }));
+    let cleanVotedUsers = votedUsers.filter(uid => !uidsToRemove.includes(uid));
+    const cleanVotedUserOpts: Record<string, string[]> = {};
+    const cleanVoterNames: Record<string, string> = {};
+
+    for (const uid of cleanVotedUsers) {
+      if (votedUserOpts[uid]) cleanVotedUserOpts[uid] = votedUserOpts[uid];
+      if (voterNames[uid]) cleanVoterNames[uid] = voterNames[uid];
+    }
+
+    for (const uid of uidsToRemove) {
+      const optIds = votedUserOpts[uid] || [];
+      for (const oid of optIds) {
+        const opt = options.find(o => o.id === oid);
+        if (opt) opt.votes = Math.max(0, opt.votes - 1);
+      }
+    }
+
     const isMulti = poll.allowMultiple;
+    const mySelectedIds = getMyPollSelectedIds(poll); // 표시 이름 기준 (원본 데이터)
+    const effectiveSelectedIds = uidsToRemove.includes(user.uid) ? [] : (cleanVotedUserOpts[user.uid] || []);
 
     if (isMulti) {
-      const alreadyVoted = mySelectedIds.includes(optionId);
-      const newSelectedIds = alreadyVoted 
-        ? mySelectedIds.filter(id => id !== optionId)
-        : [...mySelectedIds, optionId];
-      
+      const alreadyVoted = effectiveSelectedIds.includes(optionId);
+      const newSelectedIds = alreadyVoted
+        ? effectiveSelectedIds.filter(id => id !== optionId)
+        : [...effectiveSelectedIds, optionId];
+
       const voteDelta = alreadyVoted ? -1 : 1;
-      const updatedOptions = poll.options.map(opt => 
+      const updatedOptions = options.map(opt =>
         opt.id === optionId ? { ...opt, votes: Math.max(0, opt.votes + voteDelta) } : opt
       );
-      const newVotedUserOpts = { ...votedUserOpts, [user.uid]: newSelectedIds };
-      const wasInVotedUsers = votedUsers.includes(user.uid);
-      const newVotedUsers = (newSelectedIds.length > 0 && !wasInVotedUsers) 
-        ? [...votedUsers, user.uid] 
-        : (newSelectedIds.length === 0 ? votedUsers.filter(id => id !== user.uid) : votedUsers);
-      const newTotal = poll.totalVotes + voteDelta;
+      const newVotedUserOpts = { ...cleanVotedUserOpts, [user.uid]: newSelectedIds };
+      const newVotedUsers = newSelectedIds.length > 0 && !cleanVotedUsers.includes(user.uid)
+        ? [...cleanVotedUsers, user.uid]
+        : newSelectedIds.length === 0 ? cleanVotedUsers.filter(id => id !== user.uid) : cleanVotedUsers;
+      const newTotal = options.reduce((s, o) => s + o.votes, 0) + voteDelta;
 
-      const voterNames = { ...(poll.voterDisplayNames || {}), [user.uid]: userDisplayName || '익명' };
+      const finalVoterNames: Record<string, string> = { ...cleanVoterNames };
+      if (newSelectedIds.length > 0) finalVoterNames[user.uid] = userDisplayName;
+      for (const uid of Object.keys(finalVoterNames)) {
+        if (!newVotedUsers.includes(uid)) delete finalVoterNames[uid];
+      }
+
       try {
         await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'polls', pollId), {
           options: updatedOptions,
           totalVotes: Math.max(0, newTotal),
           votedUserOptions: newVotedUserOpts,
           votedUsers: newVotedUsers,
-          voterDisplayNames: voterNames
+          voterDisplayNames: finalVoterNames
         });
       } catch (err) {
         console.error("Vote error:", err);
       }
     } else {
-      // 단일 선택: 기존 투표 수정 허용 (다른 항목 클릭 시 변경)
-      const prevOptionId = mySelectedIds[0];
-      const isChangingVote = votedUsers.includes(user.uid) && prevOptionId;
+      const prevOptionId = mySelectedIds[0]; // 표시 이름 기준 현재 선택
       const isSameOption = prevOptionId === optionId;
-      if (isSameOption) return; // 같은 항목 재클릭 시 무시
 
-      let updatedOptions = poll.options.map(opt => ({ ...opt }));
-      let newTotal = poll.totalVotes;
+      if (isSameOption) {
+        // 재클릭 시 선택 해제 (options는 이미 uidsToRemove로 차감됨)
+        const newVotedUserOpts = { ...cleanVotedUserOpts };
+        delete newVotedUserOpts[user.uid];
+        const newVotedUsers = cleanVotedUsers.filter(id => id !== user.uid);
+        const newTotal = Math.max(0, options.reduce((s, o) => s + o.votes, 0));
+        const finalVoterNames = { ...cleanVoterNames };
+        delete finalVoterNames[user.uid];
 
-      if (isChangingVote) {
+        try {
+          await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'polls', pollId), {
+            options: options,
+            totalVotes: newTotal,
+            votedUserOptions: newVotedUserOpts,
+            votedUsers: newVotedUsers,
+            voterDisplayNames: finalVoterNames
+          });
+        } catch (err) {
+          console.error("Vote error:", err);
+        }
+        return;
+      }
+
+      let updatedOptions = options.map(opt => ({ ...opt }));
+      let newTotal = options.reduce((s, o) => s + o.votes, 0);
+      const isChangingVote = effectiveSelectedIds.length > 0;
+
+      if (isChangingVote && prevOptionId) {
         updatedOptions = updatedOptions.map(opt =>
           opt.id === prevOptionId ? { ...opt, votes: Math.max(0, opt.votes - 1) } :
           opt.id === optionId ? { ...opt, votes: opt.votes + 1 } : opt
         );
-        newTotal = poll.totalVotes; // totalVotes 유지 (1표만 이동)
       } else {
         updatedOptions = updatedOptions.map(opt =>
           opt.id === optionId ? { ...opt, votes: opt.votes + 1 } : opt
         );
-        newTotal = poll.totalVotes + 1;
+        newTotal += 1;
       }
 
-      const newVotedUserOpts = { ...votedUserOpts, [user.uid]: [optionId] };
-      const newVotedUsers = votedUsers.includes(user.uid) ? votedUsers : [...votedUsers, user.uid];
+      const newVotedUserOpts = { ...cleanVotedUserOpts, [user.uid]: [optionId] };
+      const newVotedUsers = cleanVotedUsers.includes(user.uid) ? cleanVotedUsers : [...cleanVotedUsers, user.uid];
+      const finalVoterNames = { ...cleanVoterNames, [user.uid]: userDisplayName };
 
-      const voterNames = { ...(poll.voterDisplayNames || {}), [user.uid]: userDisplayName || '익명' };
       try {
-        const pollRef = doc(db, 'artifacts', appId, 'public', 'data', 'polls', pollId);
-        await updateDoc(pollRef, {
+        await updateDoc(doc(db, 'artifacts', appId, 'public', 'data', 'polls', pollId), {
           options: updatedOptions,
           totalVotes: newTotal,
           votedUserOptions: newVotedUserOpts,
           votedUsers: newVotedUsers,
-          voterDisplayNames: voterNames
+          voterDisplayNames: finalVoterNames
         });
       } catch (err) {
         console.error("Vote error:", err);
@@ -526,6 +629,23 @@ export default function App() {
   };
 
   const getVoterName = (poll: Poll, uid: string) => poll.voterDisplayNames?.[uid] || '익명';
+
+  // 같은 이름 한 번만: 표시 이름 기준으로 내 투표 상태 판단 (폰/PC 다른 세션)
+  const getMyPollSelectedIds = (poll: Poll): string[] => {
+    if (!userDisplayName) return [];
+    const names = poll.voterDisplayNames || {};
+    const opts = poll.votedUserOptions || {};
+    for (const [uid, name] of Object.entries(names)) {
+      if (name === userDisplayName) return opts[uid] || [];
+    }
+    return [];
+  };
+  const hasVotedByDisplayName = (poll: Poll) => getMyPollSelectedIds(poll).length > 0;
+
+  const getUniqueVoterCount = (poll: Poll) => {
+    const names = poll.voterDisplayNames || {};
+    return new Set(Object.values(names)).size;
+  };
 
   const addOptionToPoll = async (pollId: string) => {
     if (!user || !newOptionText.trim()) return;
@@ -672,16 +792,36 @@ export default function App() {
               <p className="text-[10px] text-slate-500 font-medium">{userDisplayName}으로 접속 중</p>
             </div>
           </div>
-          <div className="text-right shrink-0">
-            <div className="text-xs sm:text-sm font-bold text-slate-700">
-              {new Date().toLocaleDateString('ko-KR', { month: 'short', day: 'numeric' })}
+          <div className="text-right shrink-0 flex items-center gap-3 sm:gap-4">
+            <div className="relative">
+              <button
+                type="button"
+                onClick={() => setShowOnlineList(prev => !prev)}
+                onBlur={() => setTimeout(() => setShowOnlineList(false), 150)}
+                className="flex items-center gap-1.5 text-[11px] sm:text-xs text-slate-500 hover:text-blue-600 transition-colors px-2 py-1 rounded-lg hover:bg-slate-50"
+              >
+                <span className="relative flex h-2 w-2 shrink-0">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
+                </span>
+                <span>{onlineUsers.length}명 접속 중</span>
+              </button>
+              {showOnlineList && onlineUsers.length > 0 && (
+                <div className="absolute right-0 top-full mt-1 py-2 px-3 bg-white rounded-lg shadow-lg border border-slate-200 text-xs text-slate-700 min-w-[120px] z-30">
+                  <p className="font-semibold text-slate-500 mb-1.5">현재 접속 중</p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {onlineUsers.map(u => (
+                      <span key={u.uid} className="px-2 py-0.5 bg-slate-100 rounded-full">
+                        {u.displayName}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
-            <div className="hidden sm:flex items-center justify-end gap-1.5 text-[11px] text-slate-400 uppercase tracking-widest">
-              <span className="relative flex h-2 w-2">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
-              </span>
-              Live Sync On
+            <span className="hidden sm:inline w-px h-4 bg-slate-200" aria-hidden />
+            <div className="text-xs sm:text-sm font-bold text-slate-700">
+              {new Date().toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour12: false, hour: '2-digit', minute: '2-digit' })}
             </div>
           </div>
         </div>
@@ -1253,10 +1393,9 @@ export default function App() {
 
             <div className="space-y-4">
               {polls.map(poll => {
-                const uid = user?.uid ?? '';
                 const isMulti = poll.allowMultiple ?? false;
-                const mySelectedIds = (poll.votedUserOptions || {})[uid] || [];
-                const hasVoted = isMulti ? mySelectedIds.length > 0 : poll.votedUsers?.includes(uid);
+                const mySelectedIds = getMyPollSelectedIds(poll);
+                const hasVoted = hasVotedByDisplayName(poll);
                 const today = new Date().toISOString().slice(0, 10);
                 const isExpired = poll.endDate ? poll.endDate < today : false;
                 const canVote = !isExpired;
@@ -1277,7 +1416,7 @@ export default function App() {
                           )}
                           {isMulti && <span className="text-[10px] text-amber-600 font-medium">복수선택</span>}
                           {poll.isAnonymous && <span className="text-[10px] text-slate-500 font-medium">익명</span>}
-                          {!poll.isAnonymous && <span className="text-[10px] text-slate-400 font-medium">총 {poll.votedUsers?.length ?? 0}명 참여</span>}
+                          {!poll.isAnonymous && <span className="text-[10px] text-slate-400 font-medium">총 {getUniqueVoterCount(poll)}명 참여</span>}
                         </div>
                       </div>
                       <div className="flex gap-1 shrink-0">
@@ -1326,9 +1465,10 @@ export default function App() {
                         return (
                           <button
                             key={opt.id}
+                            type="button"
                             disabled={!canVote}
                             onClick={() => canVote && handleVote(poll.id, opt.id)}
-                            className={`w-full text-left relative overflow-hidden rounded-xl border transition-all ${
+                            className={`w-full text-left relative overflow-hidden rounded-xl border transition-all touch-manipulation min-h-[44px] ${
                               !canVote ? 'border-slate-100 bg-slate-50/50 cursor-default' : 
                               isSelected ? 'border-slate-200 border-l-4 border-l-blue-500 bg-blue-50/30' : 'border-slate-200 hover:border-slate-300 hover:bg-slate-50/50 active:scale-[0.98] cursor-pointer'
                             }`}
@@ -1366,9 +1506,10 @@ export default function App() {
                                   .filter(([, ids]) => ids.includes(opt.id))
                                   .map(([u]) => u);
                                 if (voterUids.length === 0) return null;
+                                const names = [...new Set(voterUids.map(u => getVoterName(poll, u)))];
                                 return (
                                   <p className="text-[11px] text-slate-500 mt-1 ml-6">
-                                    {voterUids.map(u => getVoterName(poll, u)).join(', ')}
+                                    {names.join(', ')}
                                   </p>
                                 );
                               })()}
