@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Calendar, 
   CheckSquare, 
@@ -217,6 +217,10 @@ export default function App() {
   // 일정 목록 페이지네이션 (5개씩)
   const [scheduleListLimit, setScheduleListLimit] = useState(5);
   const [scheduleListLoadingMore, setScheduleListLoadingMore] = useState(false);
+  const scheduleDetailPanelRef = useRef<HTMLDivElement>(null);
+
+  // 삭제 확인 모달 (커스텀 모달 - PWA/모바일에서 native confirm 미동작 대비)
+  const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'schedule' | 'poll'; id: string } | null>(null);
 
   useEffect(() => {
     const initAuth = async () => {
@@ -277,6 +281,15 @@ export default function App() {
       setScheduleComments(prev => ({ ...prev, [expandedScheduleId]: data.sort((a, b) => a.createdAt - b.createdAt) }));
     }, (err) => console.error("Comments sync error:", err));
     return () => unsub();
+  }, [expandedScheduleId]);
+
+  // 모바일: 일정 선택 시 상세 패널로 자동 스크롤
+  useEffect(() => {
+    if (expandedScheduleId && window.innerWidth < 1024) {
+      setTimeout(() => {
+        scheduleDetailPanelRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }, 100);
+    }
   }, [expandedScheduleId]);
 
   const addSchedule = async (e: React.FormEvent) => {
@@ -518,6 +531,17 @@ export default function App() {
     }
   };
 
+  const handleDeleteConfirm = () => {
+    if (!deleteConfirm) return;
+    if (deleteConfirm.type === 'schedule') {
+      deleteSchedule(deleteConfirm.id);
+      setExpandedScheduleId(prev => prev === deleteConfirm.id ? null : prev);
+    } else {
+      deletePoll(deleteConfirm.id);
+    }
+    setDeleteConfirm(null);
+  };
+
   const addScheduleComment = async (scheduleId: string, displayName: string) => {
     if (!user || !newCommentText.trim()) return;
     const name = displayName.trim() || '익명';
@@ -579,8 +603,8 @@ export default function App() {
   const getAttendeeName = (schedule: Schedule, uid: string) => schedule.attendeeDisplayNames?.[uid] || '익명';
 
   return (
-    <div className="min-h-screen min-h-[100dvh] bg-slate-50 text-slate-900 font-sans pb-20 md:pb-6">
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-20 safe-area-inset-top">
+    <div className="min-h-screen min-h-[100dvh] bg-slate-50 text-slate-900 font-sans flex flex-col pb-20 md:pb-6">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-20 safe-area-inset-top shrink-0">
         <div className="max-w-6xl mx-auto px-3 sm:px-4 py-3 md:py-4 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
             <div className="bg-blue-600 p-1.5 sm:p-2 rounded-lg text-white shadow-lg shadow-blue-100 shrink-0">
@@ -606,7 +630,7 @@ export default function App() {
         </div>
       </header>
 
-      <main className="flex flex-col md:flex-row gap-4 md:gap-6 max-w-6xl mx-auto px-3 sm:px-4 py-4 md:py-6">
+      <main className="flex-1 flex flex-col md:flex-row gap-4 md:gap-6 max-w-6xl mx-auto px-3 sm:px-4 py-4 md:py-6 w-full">
         <div className="flex-1 min-w-0 space-y-4 md:space-y-6 w-full">
         <div className="flex bg-slate-200/50 p-1 rounded-xl touch-manipulation">
           <button 
@@ -696,7 +720,7 @@ export default function App() {
                           <Pencil size={18} />
                         </button>
                         <button
-                          onClick={(e) => { e.stopPropagation(); if (confirm('일정을 삭제할까요?')) deleteSchedule(schedule.id); }}
+                          onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'schedule', id: schedule.id }); }}
                           className="p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
                           title="삭제"
                         >
@@ -807,10 +831,86 @@ export default function App() {
               </div>
             </Card>
 
+            {/* 모바일: 캘린더 바로 밑 일정 상세 (lg 이상에서는 우측 aside로) */}
+            {expandedScheduleId && (() => {
+              const schedule = schedules.find(s => s.id === expandedScheduleId);
+              if (!schedule) return null;
+              const uid = user?.uid ?? '';
+              const myResponse: ScheduleResponse | null = schedule.attendees?.includes(uid) ? 'attend' : schedule.notAttendees?.includes(uid) ? 'notAttend' : schedule.undecided?.includes(uid) ? 'undecided' : null;
+              return (
+                <div ref={scheduleDetailPanelRef} className="lg:hidden">
+                  <Card className="overflow-hidden ring-2 ring-blue-400">
+                    <div className="p-4 border-b border-slate-100 flex items-center justify-between">
+                      <h3 className="font-bold text-slate-800 truncate">{schedule.title}</h3>
+                      <button onClick={() => setExpandedScheduleId(null)} className="p-1.5 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-600" title="닫기"><X size={18} /></button>
+                    </div>
+                    <div className="p-4 space-y-4">
+                      <div className="space-y-1 text-sm text-slate-600">
+                        <div className="flex items-center gap-2"><Calendar size={14} /> {formatDateKO(schedule.date)} {formatTime24(schedule.time) && `· ${formatTime24(schedule.time)}`}</div>
+                        {schedule.location && <div className="flex items-center gap-2"><MapPin size={14} /> {schedule.location}</div>}
+                      </div>
+                      {schedule.desc && <p className="text-sm text-slate-600 italic">&quot;{schedule.desc}&quot;</p>}
+                      <div className="flex flex-wrap gap-2 touch-manipulation">
+                        <button onClick={() => handleScheduleVote(schedule.id, 'attend')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'attend' ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-600 hover:bg-green-50'}`}>
+                          <ThumbsUp size={16} fill={myResponse === 'attend' ? 'currentColor' : 'none'} /> 참석 ({schedule.attendees?.length ?? 0})
+                        </button>
+                        <button onClick={() => handleScheduleVote(schedule.id, 'notAttend')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'notAttend' ? 'bg-red-100 text-red-700' : 'bg-slate-100 text-slate-600 hover:bg-red-50'}`}>
+                          <ThumbsDown size={16} fill={myResponse === 'notAttend' ? 'currentColor' : 'none'} /> 불참 ({schedule.notAttendees?.length ?? 0})
+                        </button>
+                        <button onClick={() => handleScheduleVote(schedule.id, 'undecided')} className={`flex items-center gap-1.5 text-sm font-medium px-3 py-2 rounded-lg min-h-[40px] ${myResponse === 'undecided' ? 'bg-amber-100 text-amber-700' : 'bg-slate-100 text-slate-600 hover:bg-amber-50'}`}>
+                          <HelpCircle size={16} fill={myResponse === 'undecided' ? 'currentColor' : 'none'} /> 미정 ({schedule.undecided?.length ?? 0})
+                        </button>
+                      </div>
+                      <div className="text-xs text-slate-500 space-y-1">
+                        {(schedule.attendees?.length ?? 0) > 0 && <p><span className="font-medium text-green-600">참:</span> {(schedule.attendees ?? []).map(u => getAttendeeName(schedule, u)).join(', ')}</p>}
+                        {(schedule.notAttendees?.length ?? 0) > 0 && <p><span className="font-medium text-red-600">불:</span> {(schedule.notAttendees ?? []).map(u => getAttendeeName(schedule, u)).join(', ')}</p>}
+                        {(schedule.undecided?.length ?? 0) > 0 && <p><span className="font-medium text-amber-600">미정:</span> {(schedule.undecided ?? []).map(u => getAttendeeName(schedule, u)).join(', ')}</p>}
+                      </div>
+                      <div className="border-t border-slate-200 pt-3">
+                        <h4 className="text-sm font-semibold text-slate-700 mb-2 flex items-center gap-1.5"><MessageCircle size={14} /> 댓글</h4>
+                        <div className="space-y-2 max-h-40 overflow-y-auto mb-2">
+                          {(scheduleComments[schedule.id] ?? []).map(c => (
+                            <div key={c.id} className="text-xs bg-white rounded-lg p-2 border border-slate-100">
+                              <span className="font-medium text-slate-700">{c.displayName}</span>
+                              <span className="text-slate-400 mx-1">·</span>
+                              <span className="text-slate-500">{new Date(c.createdAt).toLocaleString('ko-KR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                              <p className="mt-0.5 text-slate-600">{c.text}</p>
+                            </div>
+                          ))}
+                          {(scheduleComments[schedule.id] ?? []).length === 0 && <p className="text-xs text-slate-400 py-2">아직 댓글이 없습니다.</p>}
+                        </div>
+                        <div className="flex gap-2">
+                          <input
+                            className="flex-1 px-3 py-2 border border-slate-200 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none"
+                            placeholder="의견, 확답 예정일 등을 적어주세요..."
+                            value={expandedScheduleId === schedule.id ? newCommentText : ''}
+                            onChange={e => setNewCommentText(e.target.value)}
+                            onKeyDown={e => e.key === 'Enter' && !e.shiftKey && addScheduleComment(schedule.id, userDisplayName || '익명')}
+                          />
+                          <Button onClick={() => addScheduleComment(schedule.id, userDisplayName || '익명')} className="shrink-0 py-2" disabled={!newCommentText.trim()}><Send size={16} /></Button>
+                        </div>
+                      </div>
+                      <div className="flex gap-1 pt-2">
+                        <button onClick={() => startEditSchedule(schedule)} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="수정"><Pencil size={16} /></button>
+                        <button onClick={() => setDeleteConfirm({ type: 'schedule', id: schedule.id })} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="삭제"><Trash2 size={16} /></button>
+                      </div>
+                    </div>
+                  </Card>
+                </div>
+              );
+            })()}
+
             <div className="flex items-center justify-between">
               <h3 className="font-bold text-slate-800">전체 일정</h3>
               <Button 
-                onClick={() => { if (editingScheduleId) cancelEditSchedule(); setIsAddingSchedule(!isAddingSchedule); setExpandedScheduleId(null); }} 
+                onClick={() => { 
+                  if (editingScheduleId) cancelEditSchedule(); 
+                  if (!isAddingSchedule) {
+                    setNewSchedule(prev => ({ ...prev, date: '2026-01-01' }));
+                  }
+                  setIsAddingSchedule(!isAddingSchedule); 
+                  setExpandedScheduleId(null); 
+                }} 
                 variant={isAddingSchedule ? "outline" : "primary"}
                 className="text-sm py-1.5"
               >
@@ -916,14 +1016,14 @@ export default function App() {
             })()}
             </div>
 
-            {/* 우측: 캘린더에서 선택한 일정 상세 (클릭 시 이동) */}
+            {/* 우측: 캘린더에서 선택한 일정 상세 (데스크톱만, 모바일은 캘린더 밑) */}
             {expandedScheduleId && (() => {
               const schedule = schedules.find(s => s.id === expandedScheduleId);
               if (!schedule) return null;
               const uid = user?.uid ?? '';
               const myResponse: ScheduleResponse | null = schedule.attendees?.includes(uid) ? 'attend' : schedule.notAttendees?.includes(uid) ? 'notAttend' : schedule.undecided?.includes(uid) ? 'undecided' : null;
               return (
-                <aside className="w-full lg:w-80 xl:w-96 shrink-0 lg:sticky lg:top-24 h-fit">
+                <aside className="hidden lg:block w-80 xl:w-96 shrink-0 sticky top-24 h-fit">
                   <Card className="overflow-hidden ring-2 ring-blue-400">
                     <div className="p-4 border-b border-slate-100 flex items-center justify-between">
                       <h3 className="font-bold text-slate-800 truncate">{schedule.title}</h3>
@@ -977,7 +1077,7 @@ export default function App() {
                       </div>
                       <div className="flex gap-1 pt-2">
                         <button onClick={() => startEditSchedule(schedule)} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="수정"><Pencil size={16} /></button>
-                        <button onClick={() => { if (confirm('일정을 삭제할까요?')) { deleteSchedule(schedule.id); setExpandedScheduleId(null); } }} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="삭제"><Trash2 size={16} /></button>
+                        <button onClick={() => setDeleteConfirm({ type: 'schedule', id: schedule.id })} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="삭제"><Trash2 size={16} /></button>
                       </div>
                     </div>
                   </Card>
@@ -991,7 +1091,10 @@ export default function App() {
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-slate-800">투표 게시판</h2>
-              <Button onClick={() => setIsAddingPoll(!isAddingPoll)} variant={isAddingPoll ? "outline" : "primary"}>
+              <Button onClick={() => { 
+                if (!isAddingPoll) setNewPoll(prev => ({ ...prev, endDate: '2026-01-01' }));
+                setIsAddingPoll(!isAddingPoll);
+              }} variant={isAddingPoll ? "outline" : "primary"}>
                 {isAddingPoll ? "취소" : <><Plus size={18} /> 투표 생성</>}
               </Button>
             </div>
@@ -1111,8 +1214,9 @@ export default function App() {
                         </div>
                       </div>
                       <button 
-                        onClick={() => deletePoll(poll.id)} 
-                        className="p-1 text-slate-200 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-all"
+                        onClick={() => setDeleteConfirm({ type: 'poll', id: poll.id })} 
+                        className="p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
+                        title="투표 삭제"
                       >
                         <Trash2 size={18} />
                       </button>
@@ -1293,6 +1397,23 @@ export default function App() {
         </div>
         <span className="text-xs font-bold text-slate-600 uppercase tracking-wider">Cloud Connected</span>
       </div>
+
+      <footer className="mt-auto py-4 text-center text-xs text-slate-400 shrink-0">
+        © {new Date().getFullYear()} Jiun-Jeong
+      </footer>
+
+      {/* 삭제 확인 모달 */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50" onClick={() => setDeleteConfirm(null)}>
+          <div className="bg-white rounded-2xl shadow-xl p-6 max-w-sm w-full border border-slate-200" onClick={e => e.stopPropagation()}>
+            <p className="text-slate-800 font-semibold text-center mb-6">삭제하시겠습니까?</p>
+            <div className="flex gap-3">
+              <Button variant="outline" className="flex-1 py-2.5" onClick={() => setDeleteConfirm(null)}>취소</Button>
+              <Button className="flex-1 py-2.5 bg-red-600 hover:bg-red-700" onClick={handleDeleteConfirm}>삭제</Button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
