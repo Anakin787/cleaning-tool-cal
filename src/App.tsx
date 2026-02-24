@@ -163,6 +163,7 @@ interface PollOption {
 interface Poll {
   id: string;
   question: string;
+  desc?: string; // 투표 설명 (선택)
   options: PollOption[];
   totalVotes: number;
   votedUsers?: string[];
@@ -191,6 +192,7 @@ export default function App() {
   const [newSchedule, setNewSchedule] = useState({ title: '', date: '', time: '', location: '', desc: '' });
   const [newPoll, setNewPoll] = useState({ 
     question: '', 
+    desc: '', 
     options: ['', ''] as string[], 
     allowMultiple: false, 
     isAnonymous: false, 
@@ -199,6 +201,8 @@ export default function App() {
   });
   const [addingOptionToPollId, setAddingOptionToPollId] = useState<string | null>(null);
   const [newOptionText, setNewOptionText] = useState('');
+  const [editingPollId, setEditingPollId] = useState<string | null>(null);
+  const [editingPollDesc, setEditingPollDesc] = useState('');
 
   // 사용자 이름 (최초 1회 선택, localStorage에 저장)
   const [userDisplayName, setUserDisplayName] = useState<string | null>(() => {
@@ -430,9 +434,10 @@ export default function App() {
         allowMultiple: newPoll.allowMultiple,
         isAnonymous: newPoll.isAnonymous,
         allowAddOptions: newPoll.allowAddOptions,
-        endDate: newPoll.endDate.trim() || undefined
+        endDate: newPoll.endDate.trim() || undefined,
+        desc: newPoll.desc.trim() || undefined
       });
-      setNewPoll({ question: '', options: ['', ''], allowMultiple: false, isAnonymous: false, allowAddOptions: false, endDate: '' });
+      setNewPoll({ question: '', desc: '', options: ['', ''], allowMultiple: false, isAnonymous: false, allowAddOptions: false, endDate: '' });
       setIsAddingPoll(false);
     } catch (err) {
       console.error("Add poll error:", err);
@@ -549,12 +554,35 @@ export default function App() {
     }
   };
 
+  const startEditPoll = (poll: Poll) => {
+    setEditingPollId(poll.id);
+    setEditingPollDesc(poll.desc || '');
+  };
+
+  const cancelEditPoll = () => {
+    setEditingPollId(null);
+    setEditingPollDesc('');
+  };
+
+  const updatePollDesc = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!user || !editingPollId) return;
+    try {
+      const pollRef = doc(db, 'artifacts', appId, 'public', 'data', 'polls', editingPollId);
+      await updateDoc(pollRef, { desc: editingPollDesc.trim() || '' });
+      cancelEditPoll();
+    } catch (err) {
+      console.error("Update poll desc error:", err);
+    }
+  };
+
   const handleDeleteConfirm = () => {
     if (!deleteConfirm) return;
     if (deleteConfirm.type === 'schedule') {
       deleteSchedule(deleteConfirm.id);
       setExpandedScheduleId(prev => prev === deleteConfirm.id ? null : prev);
     } else {
+      if (editingPollId === deleteConfirm.id) cancelEditPoll();
       deletePoll(deleteConfirm.id);
     }
     setDeleteConfirm(null);
@@ -776,7 +804,10 @@ export default function App() {
               </div>
               {polls.length > 0 ? (
                 <Card className="p-5 bg-gradient-to-br from-white to-slate-50">
-                  <h3 className="font-bold text-slate-800 mb-4">{polls[0].question}</h3>
+                  <div className="mb-4">
+                    <h3 className="font-bold text-slate-800">{polls[0].question}</h3>
+                    {polls[0].desc && <p className="text-sm text-slate-500 mt-1 whitespace-pre-wrap">{polls[0].desc}</p>}
+                  </div>
                   <div className="space-y-3">
                     {polls[0].options.map(opt => (
                       <div key={opt.id} className="w-full h-10 bg-slate-200/50 rounded-xl relative overflow-hidden">
@@ -1118,7 +1149,7 @@ export default function App() {
             <div className="flex items-center justify-between">
               <h2 className="text-xl font-bold text-slate-800">투표 게시판</h2>
               <Button onClick={() => { 
-                if (!isAddingPoll) setNewPoll(prev => ({ ...prev, endDate: '2026-01-01' }));
+                if (!isAddingPoll) setNewPoll(prev => ({ ...prev, endDate: '2026-01-01', desc: '' }));
                 setIsAddingPoll(!isAddingPoll);
               }} variant={isAddingPoll ? "outline" : "primary"}>
                 {isAddingPoll ? "취소" : <><Plus size={18} /> 투표 생성</>}
@@ -1135,6 +1166,16 @@ export default function App() {
                     onChange={e => setNewPoll({...newPoll, question: e.target.value})}
                     required
                   />
+                  <div>
+                    <label className="block text-sm font-semibold text-slate-700 mb-1.5">설명 (선택)</label>
+                    <textarea
+                      placeholder="투표에 대한 설명이나 안내를 적어주세요"
+                      value={newPoll.desc}
+                      onChange={e => setNewPoll({...newPoll, desc: e.target.value})}
+                      rows={3}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent resize-none text-slate-800"
+                    />
+                  </div>
                   <div className="space-y-2">
                     <label className="text-sm font-semibold text-slate-700 flex justify-between items-center">
                       <span>선택 항목</span>
@@ -1223,7 +1264,7 @@ export default function App() {
                 return (
                   <Card key={poll.id} className="p-6 group">
                     <div className="flex justify-between items-start mb-4">
-                      <div>
+                      <div className="min-w-0 flex-1">
                         <h3 className="text-lg font-bold text-slate-800">{poll.question}</h3>
                         <div className="flex flex-wrap items-center gap-2 mt-1">
                           <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isExpired ? 'bg-slate-200 text-slate-600' : hasVoted ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
@@ -1239,14 +1280,43 @@ export default function App() {
                           {!poll.isAnonymous && <span className="text-[10px] text-slate-400 font-medium">총 {poll.votedUsers?.length ?? 0}명 참여</span>}
                         </div>
                       </div>
-                      <button 
-                        onClick={() => setDeleteConfirm({ type: 'poll', id: poll.id })} 
-                        className="p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors shrink-0"
-                        title="투표 삭제"
-                      >
-                        <Trash2 size={18} />
-                      </button>
+                      <div className="flex gap-1 shrink-0">
+                        <button
+                          onClick={() => startEditPoll(poll)}
+                          className="p-2 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 transition-colors"
+                          title="설명 수정"
+                        >
+                          <Pencil size={18} />
+                        </button>
+                        <button 
+                          onClick={() => setDeleteConfirm({ type: 'poll', id: poll.id })} 
+                          className="p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
+                          title="투표 삭제"
+                        >
+                          <Trash2 size={18} />
+                        </button>
+                      </div>
                     </div>
+
+                    {editingPollId === poll.id ? (
+                      <form onSubmit={updatePollDesc} className="mb-4 p-3 bg-purple-50/50 rounded-xl border border-purple-100">
+                        <label className="block text-sm font-semibold text-slate-700 mb-1.5">설명</label>
+                        <textarea
+                          value={editingPollDesc}
+                          onChange={e => setEditingPollDesc(e.target.value)}
+                          rows={3}
+                          placeholder="투표에 대한 설명이나 안내"
+                          className="w-full px-3 py-2 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-400 resize-none text-slate-800 bg-white"
+                          autoFocus
+                        />
+                        <div className="flex gap-2 mt-2">
+                          <Button type="submit" className="py-2 flex-1">수정 완료</Button>
+                          <Button type="button" variant="outline" onClick={cancelEditPoll} className="py-2 flex-1">취소</Button>
+                        </div>
+                      </form>
+                    ) : poll.desc ? (
+                      <p className="text-sm text-slate-500 mt-1 mb-4 whitespace-pre-wrap">{poll.desc}</p>
+                    ) : null}
                     
                     <div className="space-y-3">
                       {poll.options.map(opt => {
