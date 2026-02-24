@@ -142,6 +142,7 @@ interface Schedule {
   time?: string;
   location?: string;
   desc?: string;
+  creator?: string; // 생성자 uid (삭제 권한)
   attendees?: string[];
   notAttendees?: string[];
   undecided?: string[];
@@ -166,6 +167,7 @@ interface Poll {
   id: string;
   question: string;
   desc?: string; // 투표 설명 (선택)
+  creator?: string; // 생성자 uid (삭제 권한)
   options: PollOption[];
   totalVotes: number;
   votedUsers?: string[];
@@ -906,6 +908,11 @@ export default function App() {
                             <HelpCircle size={12} fill={myResponse === 'undecided' ? 'currentColor' : 'none'} /> 미정 ({undecidedCount})
                           </button>
                         </div>
+                        <div className="text-[11px] text-slate-500 space-y-0.5 mt-2">
+                          {(schedule.attendees?.length ?? 0) > 0 && <p><span className="font-medium text-green-600">참:</span> {[...new Set((schedule.attendees ?? []).map(u => getAttendeeName(schedule, u)))].join(', ')}</p>}
+                          {(schedule.notAttendees?.length ?? 0) > 0 && <p><span className="font-medium text-red-600">불:</span> {[...new Set((schedule.notAttendees ?? []).map(u => getAttendeeName(schedule, u)))].join(', ')}</p>}
+                          {(schedule.undecided?.length ?? 0) > 0 && <p><span className="font-medium text-amber-600">미정:</span> {[...new Set((schedule.undecided ?? []).map(u => getAttendeeName(schedule, u)))].join(', ')}</p>}
+                        </div>
                       </div>
                       <div className="flex items-center gap-1 shrink-0">
                         <button
@@ -915,6 +922,7 @@ export default function App() {
                         >
                           <Pencil size={18} />
                         </button>
+                        {(!schedule.creator || schedule.creator === user?.uid) && (
                         <button
                           onClick={(e) => { e.stopPropagation(); setDeleteConfirm({ type: 'schedule', id: schedule.id }); }}
                           className="p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
@@ -922,6 +930,7 @@ export default function App() {
                         >
                           <Trash2 size={18} />
                         </button>
+                        )}
                       </div>
                     </div>
                   </Card>
@@ -1090,7 +1099,9 @@ export default function App() {
                       </div>
                       <div className="flex gap-1 pt-2">
                         <button onClick={() => startEditSchedule(schedule)} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="수정"><Pencil size={16} /></button>
+                        {(!schedule.creator || schedule.creator === user?.uid) && (
                         <button onClick={() => setDeleteConfirm({ type: 'schedule', id: schedule.id })} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="삭제"><Trash2 size={16} /></button>
+                        )}
                       </div>
                     </div>
                   </Card>
@@ -1274,7 +1285,9 @@ export default function App() {
                       </div>
                       <div className="flex gap-1 pt-2">
                         <button onClick={() => startEditSchedule(schedule)} className="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg" title="수정"><Pencil size={16} /></button>
+                        {(!schedule.creator || schedule.creator === user?.uid) && (
                         <button onClick={() => setDeleteConfirm({ type: 'schedule', id: schedule.id })} className="p-2 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg" title="삭제"><Trash2 size={16} /></button>
+                        )}
                       </div>
                     </div>
                   </Card>
@@ -1427,6 +1440,7 @@ export default function App() {
                         >
                           <Pencil size={18} />
                         </button>
+                        {(!poll.creator || poll.creator === user?.uid) && (
                         <button 
                           onClick={() => setDeleteConfirm({ type: 'poll', id: poll.id })} 
                           className="p-2 rounded-lg text-slate-400 hover:text-red-500 hover:bg-red-50 transition-colors"
@@ -1434,6 +1448,7 @@ export default function App() {
                         >
                           <Trash2 size={18} />
                         </button>
+                        )}
                       </div>
                     </div>
 
